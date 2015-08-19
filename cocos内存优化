@@ -1,0 +1,552 @@
+Cocos2d-Lua（Quick-Cocos2d-x）内存释放
+
+前言
+
+对于内存的优化，网上有很多例子和教程。总体来说，就那么几种解决方案，在最后我会简单提下，这里先说下在quick中，对于图片的处理。
+
+
+
+1.查看内存调试信息
+
+对于quick框架的了解，我们可以参考\docs\文件夹里面的文件，有相关api。学会学习的第一步，就是学会看api。好了，废话不多说，下面是和内存相关的地方。
+
+但是在这里我不说具体再项目中怎么使用了，相信各位大神们一看就明白，有错误的地方，更好的，请大神们分享一下。
+
+在项目的config.lua中有些调试信息的设置，这里简单说下。
+
+在初始化框架之前，可以定义以下常量：
+
+DEBUG: 设置框架的调试输出级别
+
+DEBUG = 0           -- 不输出任何调试信息（默认值）
+
+DEBUG = 1           -- 输出基本的调试信息
+
+DEBUG = 2           -- 输出详细的调试信息
+
+DEBUG_FPS: 设置是否在画面中显示渲染帧率等信息
+
+DEBUG_FPS = false   -- 不显示（默认值）
+
+DEBUG_FPS = true    -- 显示
+
+DEBUG_MEM: 设置是否输出内存占用信息
+
+DEBUG_MEM = false   -- 不输出（默认值）
+
+DEBUG_MEM = true    -- 每 10 秒输出一次
+
+
+
+LOAD_DEPRECATED_API: 是否载入过时的 API 定义，默认为 false
+
+DISABLE_DEPRECATED_WARNING: 使用过时的 API 时是否显示警告信息，默认为 true
+
+USE_DEPRECATED_EVENT_ARGUMENTS: 是否使用过时的 Node 事件参数格式，默认为 false
+
+上面标红的就是我们要用的，可以在调试信息中看到内存的使用情况。
+
+
+
+2.SceneEx.lua
+
+Scene的自动清理更能，实现原理是exit的时候，遍历autoCleanupImages_数组，然后调用
+
+display.removeSpriteFrameByImageName(imageName)进行释放，我们可以把需要在场景切换时释放掉的图片，通过
+
+Scene:markAutoCleanupImage放到scene的autoCleanupImages_中。详细代码如下：
+
+
+local c = cc
+local Scene = c.Scene
+ 
+function Scene:setAutoCleanupEnabled()
+    self:addNodeEventListener(c.NODE_EVENT, function(event)
+        if event.name == "exit" then
+            if self.autoCleanupImages_ then
+                for imageName, v in pairs(self.autoCleanupImages_) do
+                    display.removeSpriteFrameByImageName(imageName)
+                end
+                self.autoCleanupImages_ = nil
+            end
+        end
+    end)
+end
+ 
+function Scene:markAutoCleanupImage(imageName)
+    if not self.autoCleanupImages_ then self.autoCleanupImages_ = {} end
+    self.autoCleanupImages_[imageName] = true
+    return self
+end
+
+3.display.lua
+
+对于图片的批处理、批量加载、合成大图加载、降低图片的质量等，在display中，有方法的封装和介绍。
+
+
+-- start --
+ 
+--------------------------------
+-- 将指定的 Sprite Sheets 材质文件及其数据文件载入图像帧缓存。
+-- @function [parent=#display] addSpriteFrames
+-- @param string plistFilename 数据文件名
+-- @param string image 材质文件名
+-- @see Sprite Sheets
+ 
+ 
+--[[--
+ 
+将指定的 Sprite Sheets 材质文件及其数据文件载入图像帧缓存。
+ 
+格式：
+ 
+display.addSpriteFrames(数据文件名, 材质文件名)
+ 
+~~~ lua
+ 
+-- 同步加载纹理
+display.addSpriteFrames("Sprites.plist", "Sprites.png")
+ 
+-- 异步加载纹理
+local cb = function(plist, image)
+    -- do something
+end
+display.addSpriteFrames("Sprites.plist", "Sprites.png", cb)
+ 
+~~~
+ 
+Sprite Sheets 通俗一点解释就是包含多张图片的集合。Sprite Sheets 材质文件由多张图片组成，而数据文件则记录了图片在材质文件中的位置等信息。
+ 
+]]
+-- end --
+ 
+function display.addSpriteFrames(plistFilename, image, handler)
+    local async = type(handler) == "function"
+    local asyncHandler = nil
+    if async then
+        asyncHandler = function()
+            local texture = sharedTextureCache:getTextureForKey(image)
+            assert(texture, string.format("The texture %s, %s is unavailable.", plistFilename, image))
+            sharedSpriteFrameCache:addSpriteFrames(plistFilename, texture)
+            handler(plistFilename, image)
+        end
+    end
+ 
+    if display.TEXTURES_PIXEL_FORMAT[image] then
+        cc.Texture2D:setDefaultAlphaPixelFormat(display.TEXTURES_PIXEL_FORMAT[image])
+        if async then
+            sharedTextureCache:addImageAsync(image, asyncHandler)
+        else
+            sharedSpriteFrameCache:addSpriteFrames(plistFilename, image)
+        end
+        cc.Texture2D:setDefaultAlphaPixelFormat(cc.TEXTURE2D_PIXEL_FORMAT_RGBA8888)
+    else
+        if async then
+            sharedTextureCache:addImageAsync(image, asyncHandler)
+        else
+            sharedSpriteFrameCache:addSpriteFrames(plistFilename, image)
+        end
+    end
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 从内存中卸载 Sprite Sheets 材质和数据文件
+-- @function [parent=#display] removeSpriteFramesWithFile
+-- @param string plistFilename 数据文件名
+-- @param string image 材质文件名
+ 
+-- end --
+ 
+function display.removeSpriteFramesWithFile(plistFilename, imageName)
+    sharedSpriteFrameCache:removeSpriteFramesFromFile(plistFilename)
+    if imageName then
+        display.removeSpriteFrameByImageName(imageName)
+    end
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 设置材质格式。
+-- @function [parent=#display] setTexturePixelFormat
+-- @param string filename 材质文件名
+-- @param integer format 材质格式
+-- @see Texture Pixel Format
+ 
+ 
+--[[--
+ 
+设置材质格式。
+ 
+为了节约内存，我们会使用一些颜色品质较低的材质格式，例如针对背景图使用 cc.TEXTURE2D_PIXEL_FORMAT_RGB565 格式。
+ 
+display.setTexturePixelFormat() 可以指定材质文件的材质格式，这样在加载材质文件时就会使用指定的格式。
+ 
+]]
+-- end --
+ 
+function display.setTexturePixelFormat(filename, format)
+    display.TEXTURES_PIXEL_FORMAT[filename] = format
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 从图像帧缓存中删除一个图像。
+-- @function [parent=#display] removeSpriteFrameByImageName
+-- @param string imageName 图像文件名
+ 
+--[[--
+ 
+从图像帧缓存中删除一个图像。
+ 
+有时候，某些图像仅在特定场景中使用，例如背景图。那么在场景退出时，就可以用 display.removeSpriteFrameByImageName() 从缓存里删除不再使用的图像数据。
+ 
+此外，Scene 提供了 markAutoCleanupImage() 接口，可以指定场景退出时需要自动清理的图像，推荐使用。
+ 
+]]
+-- end --
+ 
+function display.removeSpriteFrameByImageName(imageName)
+    sharedSpriteFrameCache:removeSpriteFrameByName(imageName)
+    cc.Director:getInstance():getTextureCache():removeTextureForKey(imageName)
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 从指定的图像文件创建并返回一个批量渲染对象。
+-- @function [parent=#display] newBatchNode
+-- @param string image 图像文件名
+-- @param integer capacity
+-- @return SpriteBatchNode#SpriteBatchNode ret (return value: cc.SpriteBatchNode) 
+-- @see Batch Node
+ 
+--[[--
+ 
+从指定的图像文件创建并返回一个批量渲染对象。
+ 
+~~~ lua
+ 
+local imageName = "Sprites.png"
+display.addSpriteFrames("Sprites.plist", imageName) -- 载入图像到帧缓存
+ 
+-- 下面的代码绘制 100 个图像只用了 1 次 OpenGL draw call
+local batch = display.newBatchNode(imageName)
+for i = 1, 100 do
+    local sprite = display.newSprite("#Sprite0001.png")
+    batch:addChild(sprite)
+end
+ 
+-- 下面的代码绘制 100 个图像则要使用 100 次 OpenGL draw call
+local group = display.newNode()
+for i = 1, 100 do
+    local sprite = display.newSprite("#Sprite0001.png")
+    group:addChild(sprite)
+end
+ 
+~~~
+ 
+]]
+-- end --
+ 
+function display.newBatchNode(image, capacity)
+    return cc.SpriteBatchNode:create(image, capacity or 100)
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 创建并返回一个图像帧对象。
+-- @function [parent=#display] newSpriteFrame
+-- @param string 图像帧名称
+-- @return SpriteFrameCache#SpriteFrameCache ret (return value: cc.SpriteFrameCache) 
+ 
+--[[--
+ 
+创建并返回一个图像帧对象。
+ 
+~~~ lua
+ 
+display.addSpriteFrames("Sprites.plist", "Sprites.png")
+ 
+-- 创建一个 Sprite
+local sprite = display.newSprite("#Yes.png")
+ 
+-- 创建一个图像帧
+local frameNo = display.newSpriteFrame("No.png")
+ 
+-- 在需要时，修改 Sprite 的显示内容
+sprite:setSpriteFrame(frameNo)
+ 
+~~~
+ 
+]]
+-- end --
+ 
+function display.newSpriteFrame(frameName)
+    local frame = sharedSpriteFrameCache:getSpriteFrame(frameName)
+    if not frame then
+        printError("display.newSpriteFrame() - invalid frameName %s", tostring(frameName))
+    end
+    return frame
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 以特定模式创建一个包含多个图像帧对象的数组。
+-- @function [parent=#display] newFrames
+-- @param string pattern 模式字符串
+-- @param integer begin 起始索引
+-- @param integer length 长度
+-- @param boolean isReversed 是否是递减索引
+-- @return table#table ret (return value: table)  图像帧数组
+ 
+ 
+--[[--
+ 
+以特定模式创建一个包含多个图像帧对象的数组。
+ 
+~~~ lua
+ 
+-- 创建一个数组，包含 Walk0001.png 到 Walk0008.png 的 8 个图像帧对象
+local frames = display.newFrames("Walkd.png", 1, 8)
+ 
+-- 创建一个数组，包含 Walk0008.png 到 Walk0001.png 的 8 个图像帧对象
+local frames = display.newFrames("Walkd.png", 1, 8, true)
+ 
+~~~
+ 
+]]
+-- end --
+ 
+function display.newFrames(pattern, begin, length, isReversed)
+    local frames = {}
+    local step = 1
+    local last = begin + length - 1
+    if isReversed then
+        last, begin = begin, last
+        step = -1
+    end
+ 
+    for index = begin, last, step do
+        local frameName = string.format(pattern, index)
+        local frame = sharedSpriteFrameCache:getSpriteFrame(frameName)
+        if not frame then
+            printError("display.newFrames() - invalid frame, name %s", tostring(frameName))
+            return
+        end
+ 
+        frames[#frames + 1] = frame
+    end
+    return frames
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 以包含图像帧的数组创建一个动画对象。
+-- @function [parent=#display] newAnimation
+-- @param table frames 图像帧的数组
+-- @param number time 每一桢动画之间的间隔时间
+-- @return Animation#Animation ret (return value: cc.Animation)  Animation对象
+ 
+--[[--
+ 
+以包含图像帧的数组创建一个动画对象。
+ 
+~~~ lua
+ 
+local frames = display.newFrames("Walkd.png", 1, 8)
+local animation = display.newAnimation(frames, 0.5 / 8) -- 0.5 秒播放 8 桢
+sprite:playAnimationOnce(animation) -- 播放一次动画
+ 
+~~~
+ 
+]]
+-- end --
+ 
+function display.newAnimation(frames, time)
+    local count = #frames
+    -- local array = Array:create()
+    -- for i = 1, count do
+    --     array:addObject(frames[i])
+    -- end
+    time = time or 1.0 / count
+    return cc.Animation:createWithSpriteFrames(frames, time)
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 以指定名字缓存创建好的动画对象，以便后续反复使用。
+-- @function [parent=#display] setAnimationCache
+-- @param string name 名字
+-- @param Animation animation 动画对象
+ 
+--[[--
+ 
+以指定名字缓存创建好的动画对象，以便后续反复使用。
+ 
+~~~ lua
+ 
+local frames = display.newFrames("Walkd.png", 1, 8)
+local animation = display.newAnimation(frames, 0.5 / 8) -- 0.5 秒播放 8 桢
+display.setAnimationCache("Walk", animation)
+ 
+-- 在需要使用 Walk 动画的地方
+sprite:playAnimationOnce(display.getAnimationCache("Walk")) -- 播放一次动画
+ 
+~~~
+ 
+]]
+-- end --
+ 
+function display.setAnimationCache(name, animation)
+    sharedAnimationCache:addAnimation(animation, name)
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 取得以指定名字缓存的动画对象，如果不存在则返回 nil。
+-- @function [parent=#display] getAnimationCache
+-- @param string name
+-- @return Animation#Animation ret (return value: cc.Animation) 
+ 
+-- end --
+ 
+function display.getAnimationCache(name)
+    return sharedAnimationCache:getAnimation(name)
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 删除指定名字缓存的动画对象。
+-- @function [parent=#display] removeAnimationCache
+-- @param string name
+ 
+-- end --
+ 
+function display.removeAnimationCache(name)
+    sharedAnimationCache:removeAnimation(name)
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 从内存中卸载没有使用 Sprite Sheets 材质
+-- @function [parent=#display] removeUnusedSpriteFrames
+ 
+-- end --
+ 
+function display.removeUnusedSpriteFrames()
+    sharedSpriteFrameCache:removeUnusedSpriteFrames()
+    sharedTextureCache:removeUnusedTextures()
+end
+ 
+-- start --
+ 
+--------------------------------
+-- 创建一个进度条的节点
+-- @function [parent=#display] newProgressTimer
+-- @param mixed image
+-- @param number progressType
+ 
+--[[--
+ 
+创建一个进度条的节点
+ 
+进度条类型有:
+ 
+- display.PROGRESS_TIMER_BAR
+- display.PROGRESS_TIMER_RADIAL 环形
+ 
+]]
+ 
+-- end --
+
+
+4.项目内存优化
+
+对于整个项目的内存优化，我们可以在下面几个方面。Cocos2d-x一直在更新和优化，所以，不要仅局限于下面的解决方案，只是其中的一部分，
+
+也许有的版本已经不再适应，请根据你所使用的版本和项目的具体需求，做出优化方案。
+
+（1）纹理优化
+
+上面我们讲到了quick中的优化，下面还有其他几个解决办法
+
+为了优化纹理内存的使用，我们必须知道什么因素影响了内存的使用情况。
+
+有三个因素影响了纹理的内存使用。纹理格式（压缩的还是非压缩的），颜色，大小。
+
+我们可以使用PVR格式的纹理来减少内存使用。最被建议的纹理格式是pvr.ccz，每色的bit值越高，画面质量就约好。但是也会消费很多内存。
+
+那么我们使用颜色深度是RGBA4444的纹理来代替RBGA8888，这将会消费一半内存。
+
+我们也会发现大纹理也会导致内存相关的问题。那么你最好使用适度的大小。
+
+
+
+（2）音频
+
+有三个因素影响文件内存使用。是音频文件格式，比特率，和样本率
+
+我们最希望音频文件时mp3格式。因为它被android和ios都支持。并且它也被压缩并且硬件加速了。
+
+你应该保证你的背景音乐文件大小在800KB一下。最简单的方式就是减少背景音乐播放时间并且重复调用。
+
+你应该保持你的音频文件样本率在96-128kbps之间，并且比特率在44kHz就足够了。
+
+
+
+（3）字体和粒子系统优化
+
+这里我们有两个建议：当使用BM字体显示游戏分数，在你的图片文件中选择最小的数字字符，例如：
+
+如果你想只显示数字，你可以移除所有的字符。
+
+粒子系统中，我们可以减少粒子数量来减少内存使用。
+
+
+
+（4）语言代码
+
+无内存泄露的代码。
+
+lua 注意全局变量的使用 ，局部变量不要忘记 local
+
+
+
+最后一些建议：
+
+1、一帧帧的加载游戏资源。
+
+2、减少绘制调用
+
+3、按照最大到最小的顺序的加载纹理
+
+4、避开内存使用高峰、
+
+5、使用加载界面来预加载游戏资源。
+
+6、当不需要的时候释放无用的资源
+
+7、当有内存警告的时候释放缓存的资源
+
+8、使用texturePacker来优化纹理尺寸，格式，色彩深度值等等。
+
+9、小心使用JPG文件
+
+10、使用16位RBGA4444色彩深度的纹理（看具体的机型，Android和IOS有点却别）
+
+11、使用NPOT纹理代替POT纹理
+
+12、避开加载大尺寸图片
+
+13、使用1024*1024 NPOT pvr.ccz纹理图集而不是原生图片
